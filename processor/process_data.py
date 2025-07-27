@@ -20,7 +20,7 @@ def get_db_connection():
     )
 
 def process_supplier():
-    processor = AltaceraProcess("/app/storage")
+    processor = AltaceraProcess("/storage")
     result = processor.make_report()
     unified_path = result["unified_path"]
     report_path = result["report_path"]

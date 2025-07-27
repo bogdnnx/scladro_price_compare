@@ -11,7 +11,7 @@ app = FastAPI()
 env = Environment(loader=FileSystemLoader(os.path.join(os.path.dirname(__file__), "templates")))
 
 def get_db_connection():
-    db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:password@db:5432/supplier_data')
+    db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:password@db:5432/supplier_data2')
     parsed = urlparse(db_url)
     return psycopg2.connect(
         dbname=parsed.path[1:],
