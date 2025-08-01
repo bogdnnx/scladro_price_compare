@@ -3,10 +3,9 @@ version: '3.8'
 services:
   db:
     image: postgres:13
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+    env_file:
+      - .env
+    # — то же самое, что environment: POSTGRES_USER=${POSTGRES_USER} и т. д.
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -18,23 +17,32 @@ services:
 
   processor:
     build: ./processor
+    env_file:
+      - .env
+      - .env.suppliers
     volumes:
       - ./storage:/app/storage
     depends_on:
       - db
+    command: ["python", "-u", "process_data.py"]
+    # Для наглядности можно явно прописать, но т. к. DB_URL берётся из env_file, это не обязательно:
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL}
 
   web:
     build: ./web
+    env_file:
+      - .env
+      - .env.suppliers
     ports:
       - "8000:8000"
     volumes:
       - ./storage:/app/storage
     depends_on:
       - db
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL}
 
 volumes:
   db_data:

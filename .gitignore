@@ -1,6 +1,9 @@
 database/init.sql
 
 .env
+.env.suppliers
 
-storage/altacera/
 
+.idea
+
+storage/
