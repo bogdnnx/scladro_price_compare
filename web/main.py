@@ -27,24 +27,32 @@ async def index():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT supplier_name, date, unified_path, report_path
+            SELECT supplier_name, date, current_unified_path, previous_unified_path, report_path
             FROM file_records
-            ORDER BY date DESC LIMIT 2
+            ORDER BY date DESC
         """)
         results = cur.fetchall()
         cur.close()
         conn.close()
 
         suppliers = {}
+
         for row in results:
-            supplier_name, date, unified_path, report_path = row
+            supplier_name, date, current_unified_path, previous_unified_path, report_path = row
+            # Если имя поставщика не указано, используем "Неизвестный поставщик"
+            if supplier_name is None:
+                supplier_name = "Неизвестный поставщик"
+            
             if supplier_name not in suppliers:
                 suppliers[supplier_name] = []
-            suppliers[supplier_name].append({
+            
+            file_info = {
                 "date": date.strftime("%d.%m.%Y"),
-                "unified_path": unified_path,
+                "current_unified_path": current_unified_path,
+                "previous_unified_path": previous_unified_path,
                 "report_path": report_path
-            })
+            }
+            suppliers[supplier_name].append(file_info)
 
         template = env.get_template('index.html')
         return HTMLResponse(content=template.render(suppliers=suppliers))
@@ -52,9 +60,21 @@ async def index():
     except Exception as e:
         return HTMLResponse(content=f"Ошибка: {str(e)}", status_code=500)
 
+
 @app.get("/download/{file_path:path}")
 async def download_file(file_path: str):
+    # # Убираем ведущий слеш, если он есть
+    # if file_path.startswith('/'):
+    file_path = file_path[4:]
+
+    # Проверяем, что путь не выходит за пределы storage
+    # if not file_path.startswith('storage/'):
+    #     return {"error": "Invalid file path"}
+
+    # Полный путь к файлу
+    #full_path = os.path.join('/app', file_path)
+
     if os.path.exists(file_path):
         return FileResponse(file_path)
     else:
-        return {"error": "File not found"}
+        return {"error": f"File not found: {file_path}"}

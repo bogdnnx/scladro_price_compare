@@ -6,19 +6,20 @@ import io
 import pandas as pd
 import requests
 import logging
+from database import get_db_connection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-from datetime import datetime
 
 class AltaceraProcess:
     def __init__(self, base_path):
         self.base_path = base_path
         self.supplier_path = os.path.join(base_path, "altacera")
-        self.current_df = None
-        self.previous_df = None
 
     def get_raw_files(self):
+        """
+        Получает сырые данные от поставщика Altacera
+        """
         base = 'https://zakaz.altacera.ru/load'
         raw = {}
         try:
@@ -35,6 +36,9 @@ class AltaceraProcess:
             return None
 
     def create_unified_xlsx(self):
+        """
+        Создает унифицированный DataFrame из сырых данных поставщика
+        """
         data = self.get_raw_files()
         if not data:
             return None
@@ -86,101 +90,174 @@ class AltaceraProcess:
         df = df.drop_duplicates(subset=['Артикул'], keep='last')
         return df
 
-    def compare_with_old_xlsx(self):
-        os.makedirs(self.supplier_path, exist_ok=True)
+    def check_for_changes(self, supplier_name):
+        """
+        Проверяет наличие изменений между текущим и предыдущим unified файлом.
+        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
+        """
         today_str = datetime.now().strftime("%Y-%m-%d")
-        today_dir = os.path.join(self.supplier_path, today_str)
-
-        latest_dir = None
-        for item in os.listdir(self.supplier_path):
-            if item == today_str:
-                continue
-            item_path = os.path.join(self.supplier_path, item)
-            if os.path.isdir(item_path):
-                try:
-                    item_date = datetime.strptime(item, "%d.%m.%Y")
-                    if latest_dir is None or item_date > datetime.strptime(latest_dir, "%d.%m.%Y"):
-                        latest_dir = item
-                except ValueError:
-                    continue
-
-        actual_df = self.create_unified_xlsx()
-        if actual_df is None:
+        
+        # Создаем текущий unified файл
+        current_df = self.create_unified_xlsx()
+        if current_df is None:
             logger.error("Не удалось создать текущий DataFrame")
-            return False, None
-
+            return False, None, None, None, None
+        
+        # Создаем папку для текущей даты
+        today_dir = os.path.join(self.supplier_path, today_str)
         os.makedirs(today_dir, exist_ok=True)
-        unified_path = os.path.join(today_dir, "unified.xlsx")
-        actual_df.to_excel(unified_path, index=False)
-        logger.info(f"Сохранен unified.xlsx: {unified_path}")
-
-        if latest_dir is None:
-            return False, unified_path
-
-        prev_file = os.path.join(self.supplier_path, latest_dir, "unified.xlsx")
-        if not os.path.exists(prev_file):
-            return False, unified_path
-
+        
+        # Сохраняем текущий unified файл
+        current_unified_path = os.path.join(today_dir, "unified.xlsx")
+        current_df.to_excel(current_unified_path, index=False)
+        logger.info(f"Сохранен текущий unified.xlsx: {current_unified_path}")
+        
+        # Получаем предыдущий unified файл из базы данных
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT current_unified_path 
+            FROM file_records 
+            WHERE supplier_name = %s 
+            ORDER BY date DESC 
+            LIMIT 1
+        """, (supplier_name,))
+        
+        result_row = cur.fetchone()
+        previous_unified_path = result_row[0] if result_row else None
+        cur.close()
+        conn.close()
+        
+        if previous_unified_path is None or not os.path.exists(previous_unified_path):
+            logger.info("Предыдущий unified файл не найден, сравнение невозможно")
+            return False, current_unified_path, previous_unified_path, current_df, None
+        
         try:
-            prev_df = pd.read_excel(prev_file)
+            previous_df = pd.read_excel(previous_unified_path)
+            logger.info(f"Загружен предыдущий файл: {previous_unified_path}")
         except Exception as e:
             logger.error(f"Ошибка загрузки предыдущего файла: {str(e)}")
-            return False, unified_path
-
-        if actual_df.equals(prev_df):
+            return False, current_unified_path, previous_unified_path, current_df, None
+        
+        if current_df.equals(previous_df):
             logger.info("Изменений нет")
-            return False, unified_path
+            return False, current_unified_path, previous_unified_path, current_df, previous_df
         else:
-            self.current_df = actual_df
-            self.previous_df = prev_df
-            return True, unified_path
+            logger.info("Обнаружены изменения в данных")
+            return True, current_unified_path, previous_unified_path, current_df, previous_df
 
-    def make_report(self):
-        has_changes, unified_path = self.compare_with_old_xlsx()
+    def create_date_folder_with_changes(self, supplier_name):
+        """
+        Создает папку с датой и проверяет наличие изменений.
+        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_dir = os.path.join(self.supplier_path, today_str)
+        
+        # Создаем папку для текущей даты
+        os.makedirs(today_dir, exist_ok=True)
+        logger.info(f"Создана папка для даты: {today_dir}")
+        
+        # Проверяем изменения
+        return self.check_for_changes(supplier_name)
+
+    def create_report_in_date_folder(self, supplier_name, has_changes, current_unified_path, 
+                                    previous_unified_path, current_df, previous_df):
+        """
+        Создает отчет в папке с датой.
+        Возвращает (report_path, unified_path)
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_dir = os.path.join(self.supplier_path, today_str)
+        report_path = os.path.join(today_dir, "report.xlsx")
+        
         if not has_changes:
-            return {"unified_path": unified_path, "report_path": None}
-
-        merged = pd.merge(
-            self.previous_df,
-            self.current_df,
-            on='Артикул',
-            how='outer',
-            suffixes=('_prev', '_curr'),
-            indicator=True
-        )
-
-        new_items = merged[merged['_merge'] == 'right_only'][
-            ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-        ]
-        new_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-        removed_items = merged[merged['_merge'] == 'left_only'][
-            ['Название_prev', 'Единица измерения_prev', 'Артикул', 'Цена_prev']
-        ]
-        removed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-        both = merged[merged['_merge'] == 'both']
-        changed = both[
-            (both['Название_prev'] != both['Название_curr']) |
-            (both['Единица измерения_prev'] != both['Единица измерения_curr']) |
-            (both['Цена_prev'] != both['Цена_curr'])
-        ]
-        changed_items = changed[
-            ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-        ]
-        changed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-        today_str = datetime.now().strftime("%d.%m.%Y")
-        report_path = os.path.join(self.supplier_path, today_str, "report.xlsx")
-
+            # Создаем пустой отчет с информацией об отсутствии изменений
+            try:
+                empty_df = pd.DataFrame({
+                    'Информация': ['Изменений в данных не обнаружено'],
+                    'Дата проверки': [datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
+                    'Поставщик': [supplier_name]
+                })
+                with pd.ExcelWriter(report_path) as writer:
+                    empty_df.to_excel(writer, sheet_name='Статус', index=False)
+                logger.info(f"Создан отчет об отсутствии изменений: {report_path}")
+            except Exception as e:
+                logger.error(f"Ошибка создания отчета: {e}")
+                return None, current_unified_path
+            
+            return report_path, current_unified_path
+        
+        # Создаем детальный отчет с изменениями
         try:
+            merged = pd.merge(
+                previous_df,
+                current_df,
+                on='Артикул',
+                how='outer',
+                suffixes=('_prev', '_curr'),
+                indicator=True
+            )
+
+            new_items = merged[merged['_merge'] == 'right_only'][
+                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
+            ]
+            new_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
+
+            removed_items = merged[merged['_merge'] == 'left_only'][
+                ['Название_prev', 'Единица измерения_prev', 'Артикул', 'Цена_prev']
+            ]
+            removed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
+
+            both = merged[merged['_merge'] == 'both']
+            changed = both[
+                (both['Название_prev'] != both['Название_curr']) |
+                (both['Единица измерения_prev'] != both['Единица измерения_curr']) |
+                (both['Цена_prev'] != both['Цена_curr'])
+            ]
+            changed_items = changed[
+                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
+            ]
+            changed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
+
+            # Создаем сводную информацию
+            summary_data = {
+                'Метрика': ['Всего товаров (текущих)', 'Всего товаров (предыдущих)', 
+                            'Новых товаров', 'Удаленных товаров', 'Измененных товаров'],
+                'Количество': [len(current_df), len(previous_df), 
+                              len(new_items), len(removed_items), len(changed_items)]
+            }
+            summary_df = pd.DataFrame(summary_data)
+
             with pd.ExcelWriter(report_path) as writer:
+                summary_df.to_excel(writer, sheet_name='Сводка', index=False)
                 changed_items.to_excel(writer, sheet_name='Измененные', index=False)
                 new_items.to_excel(writer, sheet_name='Добавленные', index=False)
                 removed_items.to_excel(writer, sheet_name='Удаленные', index=False)
-            logger.info(f"Создан отчет: {report_path}")
+            
+            logger.info(f"Создан детальный отчет: {report_path}")
+            
         except Exception as e:
             logger.error(f"Ошибка создания отчета: {e}")
-            return {"unified_path": unified_path, "report_path": None}
+            return None, current_unified_path
 
+        return report_path, current_unified_path
+
+    def make_report(self):
+        """
+        Основная функция для создания отчета (для обратной совместимости)
+        """
+        supplier_name = "altacera"
+        
+        # Создаем папку с датой и проверяем изменения
+        has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
+            self.create_date_folder_with_changes(supplier_name)
+        
+        # Создаем отчет
+        report_path, unified_path = self.create_report_in_date_folder(
+            supplier_name, has_changes, current_unified_path, 
+            previous_unified_path, current_df, previous_df
+        )
+        
         return {"unified_path": unified_path, "report_path": report_path}

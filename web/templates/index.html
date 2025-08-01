@@ -15,18 +15,34 @@
         <h1 class="text-2xl font-bold mb-4">Поставщики</h1>
         <ul>
             {% for supplier, files in suppliers.items() %}
-            <li class="mb-2">
-                <a href="#" onclick="toggleFiles('{{ supplier }}')" class="text-blue-500">{{ supplier }}</a>
-                <ul id="{{ supplier }}-files" class="hidden ml-4">
+            <li class="mb-4">
+                <a href="#" onclick="toggleFiles('{{ supplier }}')" class="text-blue-500 font-semibold text-lg">{{ supplier }}</a>
+                <ul id="{{ supplier }}-files" class="hidden ml-4 mt-2 space-y-2">
                     {% for file in files %}
-                    <li>
-                        <a href="/download{{ file.unified_path }}" class="text-green-500">Скачать unified.xlsx ({{ file.date }})</a>
+                    <li class="border-l-2 border-gray-300 pl-4">
+                        <div class="text-sm text-gray-600 mb-1">{{ file.date }}</div>
+                        <div class="space-y-1">
+                            <div>
+                                <a href="/download{{ file.current_unified_path }}" class="text-green-600 hover:text-green-800">
+                                    📄 Актуальный unified.xlsx
+                                </a>
+                            </div>
+                            {% if file.previous_unified_path %}
+                            <div>
+                                <a href="/download{{ file.previous_unified_path }}" class="text-blue-600 hover:text-blue-800">
+                                    📄 Предыдущий unified.xlsx
+                                </a>
+                            </div>
+                            {% endif %}
+                            {% if file.report_path %}
+                            <div>
+                                <a href="/download{{ file.report_path }}" class="text-red-600 hover:text-red-800">
+                                    📊 Отчет изменений
+                                </a>
+                            </div>
+                            {% endif %}
+                        </div>
                     </li>
-                    {% if file.report_path %}
-                    <li>
-                        <a href="/download{{ file.report_path }}" class="text-red-500">Скачать report.xlsx ({{ file.date }})</a>
-                    </li>
-                    {% endif %}
                     {% endfor %}
                 </ul>
             </li>
