@@ -6,10 +6,15 @@ import io
 import pandas as pd
 import requests
 import logging
+
+from dotenv import load_dotenv
+
 from database import get_db_connection
+import dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+load_dotenv('.env.suppliers')
 
 class AltaceraProcess:
     def __init__(self, base_path):
@@ -20,7 +25,7 @@ class AltaceraProcess:
         """
         Получает сырые данные от поставщика Altacera
         """
-        base = 'https://zakaz.altacera.ru/load'
+        base = os.getenv("ALTACERA_BASE")
         raw = {}
         try:
             for key, fname in [('nom', 'tovar_json.zip'), ('price', 'price_json.zip')]:

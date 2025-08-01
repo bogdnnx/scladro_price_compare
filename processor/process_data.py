@@ -1,11 +1,12 @@
 import os
 import psycopg2
 from urllib.parse import urlparse
+import time
 from datetime import datetime
 from suppliers.altacera import AltaceraProcess
 from database import get_db_connection
 import logging
-import pandas as pd
+import schedule
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -39,12 +40,12 @@ def process_any_supplier(processor_class, supplier_name, base_path="/app/storage
     
     cur.execute("""
         INSERT INTO file_records (date, current_unified_path, previous_unified_path, report_path, supplier_name)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (date) DO UPDATE SET
-            previous_unified_path = EXCLUDED.previous_unified_path,
-            current_unified_path = EXCLUDED.current_unified_path,
-            report_path = EXCLUDED.report_path,
-            supplier_name = EXCLUDED.supplier_name
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT ON CONSTRAINT unique_date_supplier
+    DO UPDATE SET
+        current_unified_path = EXCLUDED.current_unified_path,
+        previous_unified_path = EXCLUDED.previous_unified_path,
+        report_path = EXCLUDED.report_path
     """, (today_str, unified_path, previous_unified_path, report_path, supplier_name))
     
     conn.commit()
@@ -71,5 +72,14 @@ def main():
     # Пример добавления нового поставщика (раскомментируйте после создания класса)
     # process_any_supplier(ExampleSupplierProcess, "example_supplier")
 
+
 if __name__ == "__main__":
+    logger.info("=== Запуск initial run перед расписанием ===")
     main()
+    # Настройка расписания: запуск main каждые 6 часов
+    schedule.every(6).hours.do(main)
+
+    # Бесконечный цикл для проверки и выполнения задач по расписанию
+    while True:
+        schedule.run_pending()
+        time.sleep(1)

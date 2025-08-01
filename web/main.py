@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
@@ -5,13 +6,14 @@ import psycopg2
 from urllib.parse import urlparse
 import os
 from jinja2 import Environment, FileSystemLoader
+import dotenv
 
 app = FastAPI()
 
 env = Environment(loader=FileSystemLoader(os.path.join(os.path.dirname(__file__), "templates")))
-
+load_dotenv('.env')
 def get_db_connection():
-    db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:password@db:5432/supplier_data2')
+    db_url = os.getenv('DATABASE_URL')
     parsed = urlparse(db_url)
     return psycopg2.connect(
         dbname=parsed.path[1:],
@@ -27,9 +29,9 @@ async def index():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT supplier_name, date, current_unified_path, previous_unified_path, report_path
+            SELECT DISTINCT ON (supplier_name) supplier_name, date, current_unified_path, previous_unified_path, report_path
             FROM file_records
-            ORDER BY date DESC
+            ORDER BY supplier_name, date DESC
         """)
         results = cur.fetchall()
         cur.close()
@@ -63,17 +65,8 @@ async def index():
 
 @app.get("/download/{file_path:path}")
 async def download_file(file_path: str):
-    # # Убираем ведущий слеш, если он есть
-    # if file_path.startswith('/'):
+
     file_path = file_path[4:]
-
-    # Проверяем, что путь не выходит за пределы storage
-    # if not file_path.startswith('storage/'):
-    #     return {"error": "Invalid file path"}
-
-    # Полный путь к файлу
-    #full_path = os.path.join('/app', file_path)
-
     if os.path.exists(file_path):
         return FileResponse(file_path)
     else:
