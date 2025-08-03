@@ -217,16 +217,30 @@ class MirKeramiki:
         """
         supplier_name = "mir_keramiki"
 
-        # Создаем папку с датой и проверяем изменения
-        has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
-            self.create_date_folder_with_changes(supplier_name)
+        try:
+            # Создаем папку с датой и проверяем изменения
+            has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
+                self.create_date_folder_with_changes(supplier_name)
 
-        # Создаем отчет
-        report_path, unified_path = self.create_report_in_date_folder(
-            supplier_name, has_changes, current_unified_path,
-            previous_unified_path, current_df, previous_df
-        )
+            # Если текущий датафрейм не создан — выходим, ничего не делаем
+            if current_df is None:
+                logger.error("Прерывание: не удалось получить актуальные данные, отчет не будет создан.")
+                return {
+                    "unified_path": current_unified_path,
+                    "report_path": None,
+                    "error": "Failed to create current DataFrame"
+                }
 
-        return {"unified_path": unified_path, "report_path": report_path}
+            # Создаем отчет
+            report_path, unified_path = self.create_report_in_date_folder(
+                supplier_name, has_changes, current_unified_path,
+                previous_unified_path, current_df, previous_df
+            )
+
+            return {"unified_path": unified_path, "report_path": report_path}
+
+        except Exception as e:
+            logger.exception(f"Необработанная ошибка в make_report: {e}")
+            return {"unified_path": None, "report_path": None, "error": str(e)}
 
 
