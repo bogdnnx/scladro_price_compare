@@ -35,22 +35,25 @@ class MirKeramiki:
         if not raw_data:
             logger.info("Данные от поставщика не были получены")
             return None
-        rows = []
 
-        for item in raw_data:
+        rows = []
+        for idx, item in enumerate(raw_data):
+            article = item.get("Article")
+
+            # Если артикула нет — создаем его из ID или генерируем уникальный временный
+            if not article or not isinstance(article, str) or article.strip() == "":
+                article = f"NO_ARTICLE_{idx}"
+
             row = {
-                "Name": item.get("Name", ""),
-                "Article": item.get("Article", ""),
-                "Unit": item.get("Unit", ""),
-                "PriceDiler2": item.get("PriceDiler2", 0)  # Предполагается числовое значение, но может быть строкой
+                "Название": item.get("Name", ""),
+                "Артикул": article.strip(),
+                "Единица измерения": item.get("Unit", ""),
+                "Цена": item.get("PriceDiler2", 0)
             }
             rows.append(row)
 
-        # Создание DataFrame
         df = pd.DataFrame(rows)
-
-        # Преобразование PriceDiler2 в числовой формат (если возможно)
-        df["PriceDiler2"] = pd.to_numeric(df["PriceDiler2"], errors="coerce").fillna(0)
+        df["Цена"] = pd.to_numeric(df["Цена"], errors="coerce").fillna(0)
 
         return df
 
@@ -214,31 +217,16 @@ class MirKeramiki:
         """
         supplier_name = "mir_keramiki"
 
-        try:
-            # Создаем папку с датой и проверяем изменения
-            has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
-                self.create_date_folder_with_changes(supplier_name)
+        # Создаем папку с датой и проверяем изменения
+        has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
+            self.create_date_folder_with_changes(supplier_name)
 
-            # Если текущий датафрейм не создан — выходим, ничего не делаем
-            if current_df is None:
-                logger.error("Прерывание: не удалось получить актуальные данные, отчет не будет создан.")
-                return {
-                    "unified_path": current_unified_path,
-                    "report_path": None,
-                    "error": "Failed to create current DataFrame"
-                }
+        # Создаем отчет
+        report_path, unified_path = self.create_report_in_date_folder(
+            supplier_name, has_changes, current_unified_path,
+            previous_unified_path, current_df, previous_df
+        )
 
-            # Создаем отчет
-            report_path, unified_path = self.create_report_in_date_folder(
-                supplier_name, has_changes, current_unified_path,
-                previous_unified_path, current_df, previous_df
-            )
-
-            return {"unified_path": unified_path, "report_path": report_path}
-
-        except Exception as e:
-            logger.exception(f"Необработанная ошибка в make_report: {e}")
-            return {"unified_path": None, "report_path": None, "error": str(e)}
-
+        return {"unified_path": unified_path, "report_path": report_path}
 
 
