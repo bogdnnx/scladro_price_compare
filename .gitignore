@@ -2,7 +2,6 @@ database/init.sql
 
 .env
 .env.suppliers
-
 __pycache__/
 **/__pycache__/
 
