@@ -3,7 +3,12 @@ database/init.sql
 .env
 .env.suppliers
 
+__pycache__/
+**/__pycache__/
 
+# Дополнительно: игнорировать скомпилированные Python-файлы
+*.pyc
+*.pyo
+*.pyd
 .idea
-
 storage/

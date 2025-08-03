@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import time
 from datetime import datetime
 from suppliers.altacera import AltaceraProcess
+from suppliers.mir_keramiki import MirKeramiki
 from database import get_db_connection
 import logging
 import schedule
@@ -64,6 +65,7 @@ def process_supplier():
     Основная функция обработки поставщика Altacera (для обратной совместимости)
     """
     process_any_supplier(AltaceraProcess, "altacera", "/app/storage")
+    process_any_supplier(MirKeramiki, "mir_keramiki", "/app/storage")
 
 def main():
     # Обработка поставщика Altacera
@@ -77,7 +79,7 @@ if __name__ == "__main__":
     logger.info("=== Запуск initial run перед расписанием ===")
     main()
     # Настройка расписания: запуск main каждые 6 часов
-    schedule.every(6).hours.do(main)
+    schedule.every(12).hours.do(main)
 
     # Бесконечный цикл для проверки и выполнения задач по расписанию
     while True:
