@@ -6,8 +6,9 @@ import io
 import pandas as pd
 import requests
 import logging
-
+import time
 from dotenv import load_dotenv
+from requests import RequestException
 
 from database import get_db_connection
 import dotenv
@@ -21,24 +22,42 @@ class AltaceraProcess:
         self.base_path = base_path
         self.supplier_path = os.path.join(base_path, "altacera")
 
-    def get_raw_files(self):
+    def get_raw_files(self, retries=3, delay=5, timeout=10):
         """
-        Получает сырые данные от поставщика Altacera
+        Получает сырые данные от поставщика Altacera с повторными попытками
         """
         base = os.getenv("ALTACERA_BASE")
         raw = {}
-        try:
-            for key, fname in [('nom', 'tovar_json.zip'), ('price', 'price_json.zip')]:
-                r = requests.get(f'{base}/{fname}', timeout=10)
-                r.raise_for_status()
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    with z.open(z.namelist()[0]) as f:
-                        raw[key] = json.load(f)
-            logger.info("Данные успешно загружены из API")
-            return raw
-        except requests.RequestException as e:
-            logger.error(f"Ошибка при загрузке данных из API: {e}")
-            return None
+
+        for key, fname in [('nom', 'tovar_json.zip'), ('price', 'price_json.zip')]:
+            success = False
+            for attempt in range(1, retries + 1):
+                try:
+                    logger.info(f"[{key}] Попытка {attempt} — запрос {fname}")
+                    r = requests.get(f'{base}/{fname}', timeout=timeout)
+                    r.raise_for_status()
+
+                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                        with z.open(z.namelist()[0]) as f:
+                            raw[key] = json.load(f)
+
+                    logger.info(f"[{key}] Успешно получено")
+                    success = True
+                    break  # выходим из цикла попыток
+                except RequestException as e:
+                    logger.warning(f"[{key}] Попытка {attempt} неудачна: {e}")
+                    if attempt < retries:
+                        logger.info(f"[{key}] Жду {delay} секунд перед следующей попыткой...")
+                        time.sleep(delay)
+                except (zipfile.BadZipFile, json.JSONDecodeError, IndexError) as e:
+                    logger.error(f"[{key}] Ошибка при обработке содержимого ZIP/JSON: {e}")
+                    break  # это ошибка не сети, а данных — нет смысла повторять
+
+            if not success:
+                logger.error(f"[{key}] Не удалось загрузить {fname} после {retries} попыток")
+                return None  # прерываем всё, если хотя бы один файл не загружен
+
+        return raw
 
     def create_unified_xlsx(self):
         """

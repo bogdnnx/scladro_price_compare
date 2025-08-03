@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 import logging
+from requests import RequestException
+import time
 from database import get_db_connection
 import json
 import requests
@@ -21,14 +23,35 @@ class MirKeramiki:
         self.base_path = base_path
         self.supplier_path = os.path.join(base_path, "mir_keramiki")
 
-    def get_raw_files(self):
+    def get_raw_files(self, retries=3, delay=5, timeout=10):
         """
-        получение данных по апи
-        Returns: сырые данные(json)
+        Получение данных от API с повторными попытками при ошибках сети.
+        retries: сколько раз пробовать
+        delay: задержка между попытками (в секундах)
+        timeout: тайм-аут запроса
         """
-        req = requests.get(os.getenv("MIR_KERAMIKI_API"), headers={"authorization":os.getenv("MIR_KERAMIKI_KEY")})
+        url = os.getenv("MIR_KERAMIKI_API")
+        headers = {"authorization": os.getenv("MIR_KERAMIKI_KEY")}
 
-        return req.content.decode()
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests.get(url, headers=headers, timeout=timeout)
+
+                if response.status_code == 200:
+                    return response.content.decode()
+                else:
+                    logger.warning(f"Попытка {attempt}: API вернул код {response.status_code}")
+
+            except RequestException as e:
+                logger.warning(f"Попытка {attempt}: Ошибка сети: {e}")
+
+            # ждем перед следующей попыткой (если не последняя)
+            if attempt < retries:
+                logger.info(f"Жду {delay} секунд перед следующей попыткой...")
+                time.sleep(delay)
+
+        logger.error("Не удалось получить данные от API после нескольких попыток.")
+        return None
 
     def create_unified_xlsx(self):
         raw_data = json.loads(self.get_raw_files())
