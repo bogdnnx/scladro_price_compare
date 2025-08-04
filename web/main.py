@@ -68,6 +68,6 @@ async def download_file(file_path: str):
 
     file_path = file_path[4:]
     if os.path.exists(file_path):
-        return FileResponse(file_path)
+        return FileResponse(file_path, headers={"Content-Disposition": "attachment"})
     else:
         return {"error": f"File not found: {file_path}"}
