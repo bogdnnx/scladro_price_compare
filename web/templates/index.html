@@ -19,31 +19,43 @@
                 <a href="#" onclick="toggleFiles('{{ supplier }}')" class="text-blue-500 font-semibold text-lg">{{ supplier }}</a>
                 <ul id="{{ supplier }}-files" class="hidden ml-4 mt-2 space-y-2">
                     {% for file in files %}
-                    <li class="border-l-2 border-gray-300 pl-4">
+                      <li class="border-l-2 border-gray-300 pl-4">
+                        {# Для текущего файла мы можем использовать file.date как имя папки #}
                         <div class="text-sm text-gray-600 mb-1">{{ file.date }}</div>
                         <div class="space-y-1">
-                            <div>
-                                <a href="/download{{ file.current_unified_path }}" class="text-green-600 hover:text-green-800">
-                                    📄 Актуальный unified.xlsx
-                                </a>
-                            </div>
-                            {% if file.previous_unified_path %}
-                            <div>
-                                <a href="/download{{ file.previous_unified_path }}" class="text-blue-600 hover:text-blue-800">
-                                    📄 Предыдущий unified.xlsx
-                                </a>
-                            </div>
-                            {% endif %}
-                            {% if file.report_path %}
-                            <div>
-                                <a href="/download{{ file.report_path }}" class="text-red-600 hover:text-red-800">
-                                    📊 Отчет изменений
-                                </a>
-                            </div>
-                            {% endif %}
+                          {# Ссылка на текущий unified.xlsx #}
+                          <div>
+                            <a href="/download{{ file.current_unified_path }}"
+                               class="text-green-600 hover:text-green-800">
+                              {{ "📄 Актуальный unified.xlsx (" ~ file.date ~ ")" }}
+                            </a>
+                          </div>
+
+                          {# Ссылка на предыдущий unified.xlsx: достаём дату из пути #}
+                          {% if file.previous_unified_path %}
+                          {% set prev_date = file.previous_unified_path.split('/')[-2] %}
+                          <div>
+                            <a href="/download{{ file.previous_unified_path }}"
+                               class="text-blue-600 hover:text-blue-800">
+                              {{ "📄 Предыдущий unified.xlsx (" ~ prev_date ~ ")" }}
+                            </a>
+                          </div>
+                          {% endif %}
+
+                          {# Ссылка на отчёт: дату тоже берём из папки #}
+                          {% if file.report_path %}
+                          {% set report_date = file.report_path.split('/')[-2] %}
+                          <div>
+                            <a href="/download{{ file.report_path }}"
+                               class="text-red-600 hover:text-red-800">
+                              {{ "📊 Отчет изменений (" ~ report_date ~ ")" }}
+                            </a>
+                          </div>
+                          {% endif %}
                         </div>
-                    </li>
+                      </li>
                     {% endfor %}
+
                 </ul>
             </li>
             {% endfor %}

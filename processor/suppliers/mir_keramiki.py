@@ -1,269 +1,184 @@
 from datetime import datetime
 from pathlib import Path
 import logging
-from requests import RequestException
-import time
-from database import get_db_connection
-import json
-import requests
 import os
-from dotenv import load_dotenv
+import json
+import time
+import requests
 import pandas as pd
-import openpyxl
+from dotenv import load_dotenv
+from database import get_db_connection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-project_root = Path(__file__).parent.parent.parent  # Поднимаемся на два уровня от suppliers/
+# Load environment variables
+project_root = Path(__file__).parent.parent.parent
 env_path = project_root / '.env.suppliers'
 load_dotenv(env_path)
 
 class MirKeramiki:
     def __init__(self, base_path):
         self.base_path = base_path
-        self.supplier_path = os.path.join(base_path, "mir_keramiki")
+        self.supplier_path = os.path.join(base_path, 'mir_keramiki')
+        os.makedirs(self.supplier_path, exist_ok=True)
 
-    def get_raw_files(self, retries=3, delay=5, timeout=10):
+    def _fetch_raw(self, retries=3, delay=5, timeout=10) -> list:
         """
-        Получение данных от API с повторными попытками при ошибках сети.
-        retries: сколько раз пробовать
-        delay: задержка между попытками (в секундах)
-        timeout: тайм-аут запроса
+        Получает сырые данные JSON с API, возвращает список
         """
-        url = os.getenv("MIR_KERAMIKI_API")
-        headers = {"authorization": os.getenv("MIR_KERAMIKI_KEY")}
-
+        url = os.getenv('MIR_KERAMIKI_API')
+        headers = {'authorization': os.getenv('MIR_KERAMIKI_KEY')}
         for attempt in range(1, retries + 1):
             try:
-                response = requests.get(url, headers=headers, timeout=timeout)
-
-                if response.status_code == 200:
-                    return response.content.decode()
-                else:
-                    logger.warning(f"Попытка {attempt}: API вернул код {response.status_code}")
-
-            except RequestException as e:
-                logger.warning(f"Попытка {attempt}: Ошибка сети: {e}")
-
-            # ждем перед следующей попыткой (если не последняя)
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    return resp.json()
+                logger.warning(f"Попытка {attempt}: статус {resp.status_code}")
+            except requests.RequestException as e:
+                logger.warning(f"Попытка {attempt}: ошибка сети {e}")
             if attempt < retries:
-                logger.info(f"Жду {delay} секунд перед следующей попыткой...")
                 time.sleep(delay)
+        logger.error('Не удалось получить данные от API')
+        return []
 
-        logger.error("Не удалось получить данные от API после нескольких попыток.")
-        return None
-
-    def create_unified_xlsx(self):
-        raw_data = json.loads(self.get_raw_files())
-        if not raw_data:
-            logger.info("Данные от поставщика не были получены")
-            return None
-
+    def _to_dataframe(self, data: list) -> pd.DataFrame:
+        """
+        Преобразует список словарей в DataFrame
+        """
         rows = []
-        for idx, item in enumerate(raw_data):
-            article = item.get("Article")
-
-            # Если артикула нет — создаем его из ID или генерируем уникальный временный
-            if not article or not isinstance(article, str) or article.strip() == "":
-                article = f"NO_ARTICLE_{idx}"
-
-            row = {
-                "Название": item.get("Name", ""),
-                "Артикул": article.strip(),
-                "Единица измерения": item.get("Unit", ""),
-                "Цена": item.get("PriceDiler2", 0)
-            }
-            rows.append(row)
-
+        for idx, item in enumerate(data):
+            name = item.get('Name', '').strip()
+            if not name:
+                continue
+            article = item.get('Article')
+            if not article or not isinstance(article, str) or not article.strip():
+                article = f'NO_ARTICLE_{idx}'
+            unit = item.get('Unit', '')
+            price = item.get('PriceDiler2', 0)
+            rows.append({
+                'Название': name,
+                'Артикул': article.strip(),
+                'Единица измерения': unit,
+                'Цена': price
+            })
         df = pd.DataFrame(rows)
-        df["Цена"] = pd.to_numeric(df["Цена"], errors="coerce").fillna(0)
-
+        # Приводим цену к числовому типу и заполняем NaN нулями
+        if not df.empty:
+            df['Цена'] = pd.to_numeric(df['Цена'], errors='coerce').fillna(0)
+        # Удаляем дубликаты по названию, оставляя последнюю запись
+        df = df.drop_duplicates(subset=['Название'], keep='last')
         return df
 
-    def check_for_changes(self, supplier_name):
+    def _load_previous(self, supplier_name: str) -> pd.DataFrame:
         """
-        Проверяет наличие изменений между текущим и предыдущим unified файлом.
-        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
+        Загружает последний unified-файл из БД
         """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-
-        # Создаем текущий unified файл
-        current_df = self.create_unified_xlsx()
-        if current_df is None:
-            logger.error("Не удалось создать текущий DataFrame")
-            return False, None, None, None, None
-
-        # Создаем папку для текущей даты
-        today_dir = os.path.join(self.supplier_path, today_str)
-        os.makedirs(today_dir, exist_ok=True)
-
-        # Сохраняем текущий unified файл
-        current_unified_path = os.path.join(today_dir, "unified.xlsx")
-        current_df.to_excel(current_unified_path, index=False)
-        logger.info(f"Сохранен текущий unified.xlsx: {current_unified_path}")
-
-        # Получаем предыдущий unified файл из базы данных
         conn = get_db_connection()
         cur = conn.cursor()
-
-        cur.execute("""
-            SELECT current_unified_path 
-            FROM file_records 
-            WHERE supplier_name = %s 
-            ORDER BY date DESC 
-            LIMIT 1
-        """, (supplier_name,))
-
-        result_row = cur.fetchone()
-        previous_unified_path = result_row[0] if result_row else None
-        cur.close()
-        conn.close()
-
-        if previous_unified_path is None or not os.path.exists(previous_unified_path):
-            logger.info("Предыдущий unified файл не найден, сравнение невозможно")
-            return False, current_unified_path, previous_unified_path, current_df, None
-
-        try:
-            previous_df = pd.read_excel(previous_unified_path)
-            logger.info(f"Загружен предыдущий файл: {previous_unified_path}")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки предыдущего файла: {str(e)}")
-            return False, current_unified_path, previous_unified_path, current_df, None
-
-        if current_df.equals(previous_df):
-            logger.info("Изменений нет")
-            return False, current_unified_path, previous_unified_path, current_df, previous_df
-        else:
-            logger.info("Обнаружены изменения в данных")
-            return True, current_unified_path, previous_unified_path, current_df, previous_df
-
-    def create_date_folder_with_changes(self, supplier_name):
-        """
-        Создает папку с датой и проверяет наличие изменений.
-        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
-        """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_dir = os.path.join(self.supplier_path, today_str)
-
-        # Создаем папку для текущей даты
-        os.makedirs(today_dir, exist_ok=True)
-        logger.info(f"Создана папка для даты: {today_dir}")
-
-        # Проверяем изменения
-        return self.check_for_changes(supplier_name)
-
-    def create_report_in_date_folder(self, supplier_name, has_changes, current_unified_path,
-                                     previous_unified_path, current_df, previous_df):
-        """
-        Создает отчет в папке с датой.
-        Возвращает (report_path, unified_path)
-        """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_dir = os.path.join(self.supplier_path, today_str)
-        report_path = os.path.join(today_dir, "report.xlsx")
-
-        if not has_changes:
-            # Создаем пустой отчет с информацией об отсутствии изменений
+        cur.execute(
+            "SELECT current_unified_path FROM file_records WHERE supplier_name=%s ORDER BY date DESC LIMIT 1",
+            (supplier_name,)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        path = row[0] if row else None
+        if path and os.path.exists(path):
             try:
-                empty_df = pd.DataFrame({
-                    'Информация': ['Изменений в данных не обнаружено'],
-                    'Дата проверки': [datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
-                    'Поставщик': [supplier_name]
-                })
-                with pd.ExcelWriter(report_path) as writer:
-                    empty_df.to_excel(writer, sheet_name='Статус', index=False)
-                logger.info(f"Создан отчет об отсутствии изменений: {report_path}")
+                return pd.read_excel(path)
             except Exception as e:
-                logger.error(f"Ошибка создания отчета: {e}")
-                return None, current_unified_path
+                logger.error(f"Ошибка чтения предыдущего файла: {e}")
+        return None
 
-            return report_path, current_unified_path
-
-        # Создаем детальный отчет с изменениями
-        try:
-            merged = pd.merge(
-                previous_df,
-                current_df,
-                on='Артикул',
-                how='outer',
-                suffixes=('_prev', '_curr'),
-                indicator=True
-            )
-
-            new_items = merged[merged['_merge'] == 'right_only'][
-                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-            ]
-            new_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            removed_items = merged[merged['_merge'] == 'left_only'][
-                ['Название_prev', 'Единица измерения_prev', 'Артикул', 'Цена_prev']
-            ]
-            removed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            both = merged[merged['_merge'] == 'both']
-            changed = both[
-                (both['Название_prev'] != both['Название_curr']) |
-                (both['Единица измерения_prev'] != both['Единица измерения_curr']) |
-                (both['Цена_prev'] != both['Цена_curr'])
-                ]
-            changed_items = changed[
-                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-            ]
-            changed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            # Создаем сводную информацию
-            summary_data = {
-                'Метрика': ['Всего товаров (текущих)', 'Всего товаров (предыдущих)',
-                            'Новых товаров', 'Удаленных товаров', 'Измененных товаров'],
-                'Количество': [len(current_df), len(previous_df),
-                               len(new_items), len(removed_items), len(changed_items)]
-            }
-            summary_df = pd.DataFrame(summary_data)
-
-            with pd.ExcelWriter(report_path) as writer:
-                summary_df.to_excel(writer, sheet_name='Сводка', index=False)
-                changed_items.to_excel(writer, sheet_name='Измененные', index=False)
-                new_items.to_excel(writer, sheet_name='Добавленные', index=False)
-                removed_items.to_excel(writer, sheet_name='Удаленные', index=False)
-
-            logger.info(f"Создан детальный отчет: {report_path}")
-
-        except Exception as e:
-            logger.error(f"Ошибка создания отчета: {e}")
-            return None, current_unified_path
-
-        return report_path, current_unified_path
-
-    def make_report(self):
+    def _compare(self, prev: pd.DataFrame, curr: pd.DataFrame) -> (bool, dict):
         """
-        Основная функция для создания отчета (для обратной совместимости)
+        Сравнивает prev и curr по названию
         """
-        supplier_name = "mir_keramiki"
+        if prev is None:
+            return True, {'new': curr, 'removed': pd.DataFrame(), 'changed': pd.DataFrame()}
+        merged = prev.merge(curr, on='Название', how='outer', indicator=True,
+                             suffixes=('_prev','_curr'))
+        new = merged[merged['_merge']=='right_only'][
+            ['Название','Артикул_curr','Единица измерения_curr','Цена_curr']]
+        new.columns = ['Название','Артикул','Единица измерения','Цена']
+        removed = merged[merged['_merge']=='left_only'][
+            ['Название','Артикул_prev','Единица измерения_prev','Цена_prev']]
+        removed.columns = ['Название','Артикул','Единица измерения','Цена']
+        both = merged[merged['_merge']=='both']
+        changed = both[(
+            (both['Артикул_prev'] != both['Артикул_curr']) |
+            (both['Единица измерения_prev'] != both['Единица измерения_curr']) |
+            (both['Цена_prev'] != both['Цена_curr'])
+        )][['Название','Артикул_curr','Единица измерения_curr','Цена_curr']]
+        changed.columns = ['Название','Артикул','Единица измерения','Цена']
+        has = not new.empty or not removed.empty or not changed.empty
+        return has, {'new': new, 'removed': removed, 'changed': changed}
 
-        try:
-            # Создаем папку с датой и проверяем изменения
-            has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
-                self.create_date_folder_with_changes(supplier_name)
+    def make_report(self, supplier_name: str = 'mir_keramiki') -> dict:
+        """
+        Основной метод: получает, сравнивает и сохраняет при изменениях
+        """
+        raw = self._fetch_raw()
+        curr_df = self._to_dataframe(raw) if raw else None
+        prev_df = self._load_previous(supplier_name)
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        dated_folder = os.path.join(self.supplier_path, date_str)
+        os.makedirs(dated_folder, exist_ok=True)
+        if curr_df is None:
+            logger.error('Не удалось получить или обработать данные')
+            return {'unified_path': None, 'report_path': None}
+        has_changes, parts = self._compare(prev_df, curr_df)
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        if not has_changes:
+            logger.info('Изменений не обнаружено, файлы не создаются.')
+            return {'unified_path': None, 'report_path': None}
+        # Сохранение unified
+        # unified_name = f'unified_{date_str}.xlsx'
+        # unified_path = os.path.join(self.supplier_path, unified_name)
+        unified_path = os.path.join(dated_folder, 'unified.xlsx')
 
-            # Если текущий датафрейм не создан — выходим, ничего не делаем
-            if current_df is None:
-                logger.error("Прерывание: не удалось получить актуальные данные, отчет не будет создан.")
-                return {
-                    "unified_path": current_unified_path,
-                    "report_path": None,
-                    "error": "Failed to create current DataFrame"
-                }
+        curr_df.to_excel(unified_path, index=False)
+        logger.info(f'Saved unified: {unified_path}')
+        # Создание отчета
+        # report_name = f'report_{date_str}.xlsx'
+        # report_path = os.path.join(self.supplier_path, report_name)
+        report_path = os.path.join(dated_folder, 'report.xlsx')
 
-            # Создаем отчет
-            report_path, unified_path = self.create_report_in_date_folder(
-                supplier_name, has_changes, current_unified_path,
-                previous_unified_path, current_df, previous_df
-            )
+        summary = pd.DataFrame({
+            'Метрика': ['Всего (текущих)','Всего (предыдущих)','Добавленные','Удаленные','Измененные'],
+            'Количество': [len(curr_df), len(prev_df) if prev_df is not None else 0,
+                           len(parts['new']), len(parts['removed']), len(parts['changed'])]
+        })
+        with pd.ExcelWriter(report_path) as writer:
+            summary.to_excel(writer, sheet_name='Сводка', index=False)
+            parts['new'].to_excel(writer, sheet_name='Добавленные', index=False)
+            parts['removed'].to_excel(writer, sheet_name='Удаленные', index=False)
+            parts['changed'].to_excel(writer, sheet_name='Измененные', index=False)
+        logger.info(f'Saved report: {report_path}')
+        # Запись в БД
+        conn = get_db_connection()
+        cur = conn.cursor()
+        prev_path = self._load_previous_path(supplier_name)
+        cur.execute(
+            "INSERT INTO file_records(date,current_unified_path,previous_unified_path,report_path,supplier_name)"
+            " VALUES(%s,%s,%s,%s,%s)"
+            " ON CONFLICT(date,supplier_name) DO UPDATE SET"
+            " current_unified_path=EXCLUDED.current_unified_path, report_path=EXCLUDED.report_path",
+            (date_str, unified_path, prev_path, report_path, supplier_name)
+        )
+        conn.commit(); cur.close(); conn.close()
+        return {'unified_path': unified_path, 'report_path': report_path}
 
-            return {"unified_path": unified_path, "report_path": report_path}
-
-        except Exception as e:
-            logger.exception(f"Необработанная ошибка в make_report: {e}")
-            return {"unified_path": None, "report_path": None, "error": str(e)}
-
-
+    def _load_previous_path(self, supplier_name: str) -> str:
+        """
+        Возвращает путь к предыдущему unified-файлу
+        """
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT current_unified_path FROM file_records WHERE supplier_name=%s ORDER BY date DESC LIMIT 1",
+            (supplier_name,)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        return row[0] if row else None

@@ -1,301 +1,218 @@
-import json
-import os
-import zipfile
 from datetime import datetime
+from pathlib import Path
+import os
 import io
-import pandas as pd
-import requests
-import logging
+import json
 import time
+import zipfile
+import logging
+import requests
+import pandas as pd
 from dotenv import load_dotenv
-from requests import RequestException
-
 from database import get_db_connection
-import dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-load_dotenv('.env.suppliers')
+
+# Load environment variables
+project_root = Path(__file__).parent.parent.parent
+env_path = project_root / '.env.suppliers'
+load_dotenv(env_path)
 
 class AltaceraProcess:
     def __init__(self, base_path):
         self.base_path = base_path
-        self.supplier_path = os.path.join(base_path, "altacera")
+        self.supplier_path = os.path.join(base_path, 'altacera')
+        os.makedirs(self.supplier_path, exist_ok=True)
 
-    def get_raw_files(self, retries=3, delay=5, timeout=10):
+    def _fetch_raw(self, retries=3, delay=5, timeout=10) -> dict:
         """
-        Получает сырые данные от поставщика Altacera с повторными попытками
+        Загрузка и распаковка ZIP-файлов с данными 'nom' и 'price'
         """
-        base = os.getenv("ALTACERA_BASE")
+        base_url = os.getenv('ALTACERA_BASE')
         raw = {}
-
         for key, fname in [('nom', 'tovar_json.zip'), ('price', 'price_json.zip')]:
-            success = False
             for attempt in range(1, retries + 1):
                 try:
-                    logger.info(f"[{key}] Попытка {attempt} — запрос {fname}")
-                    r = requests.get(f'{base}/{fname}', timeout=timeout)
-                    r.raise_for_status()
+                    logger.info(f"[{key}] Запрос {fname}, попытка {attempt}")
+                    resp = requests.get(f"{base_url}/{fname}", timeout=timeout)
+                    resp.raise_for_status()
 
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
                         with z.open(z.namelist()[0]) as f:
                             raw[key] = json.load(f)
-
-                    logger.info(f"[{key}] Успешно получено")
-                    success = True
-                    break  # выходим из цикла попыток
-                except RequestException as e:
-                    logger.warning(f"[{key}] Попытка {attempt} неудачна: {e}")
-                    if attempt < retries:
-                        logger.info(f"[{key}] Жду {delay} секунд перед следующей попыткой...")
-                        time.sleep(delay)
+                    logger.info(f"[{key}] Успешно загружено")
+                    break
+                except requests.RequestException as e:
+                    logger.warning(f"[{key}] Сетевая ошибка: {e}")
                 except (zipfile.BadZipFile, json.JSONDecodeError, IndexError) as e:
-                    logger.error(f"[{key}] Ошибка при обработке содержимого ZIP/JSON: {e}")
-                    break  # это ошибка не сети, а данных — нет смысла повторять
+                    logger.error(f"[{key}] Ошибка в содержимом ZIP/JSON: {e}")
+                    return {}
 
-            if not success:
-                logger.error(f"[{key}] Не удалось загрузить {fname} после {retries} попыток")
-                return None  # прерываем всё, если хотя бы один файл не загружен
-
+                if attempt < retries:
+                    time.sleep(delay)
+            else:
+                logger.error(f"[{key}] Не удалось загрузить после {retries} попыток")
+                return {}
         return raw
 
-    def create_unified_xlsx(self):
+    def _to_dataframe(self, raw: dict) -> pd.DataFrame:
         """
-        Создает унифицированный DataFrame из сырых данных поставщика
+        Формирование unified DataFrame с колонками Название, Артикул, Единица измерения, Цена
         """
-        data = self.get_raw_files()
-        if not data:
-            return None
-        nom_data = data['nom']
-        price_data = data['price']
-
+        nom = raw.get('nom', [])
+        price = raw.get('price', [])
+        # Создаем mapping по парам (tovar_id, unit_id)
         mapping = {}
-        for item in nom_data:
+        for item in nom:
             tovar_id = item.get('tovar_id') or item.get('id')
-            if not tovar_id:
-                continue
+            name = item.get('tovar') or item.get('name') or item.get('title')
             artikul = item.get('artikul') or item.get('article') or item.get('sku')
-            tovar_name = item.get('tovar') or item.get('name') or item.get('title')
             for unit in item.get('units', []):
                 unit_id = unit.get('unit_id')
-                if not unit_id:
-                    continue
-                key = (tovar_id, unit_id)
-                mapping[key] = {
-                    'Название': tovar_name,
-                    'Единица измерения': unit.get('unit', 'шт'),
-                    'Артикул': artikul
-                }
+                if tovar_id and unit_id:
+                    mapping[(tovar_id, unit_id)] = {
+                        'Название': name,
+                        'Артикул': artikul,
+                        'Единица измерения': unit.get('unit', 'шт')
+                    }
 
-        unified_data = []
-        for price_block in price_data:
-            for price_item in price_block.get('price_list', []):
-                tovar_id = price_item.get('tovar_id')
-                unit_id = price_item.get('unit_id')
-                price_value = price_item.get('price') or price_item.get('value')
-                if not tovar_id or not unit_id or not price_value:
-                    continue
-                key = (tovar_id, unit_id)
-                base_info = mapping.get(key)
-                if base_info:
-                    unified_data.append({
-                        **base_info,
-                        'Цена': price_value
-                    })
+        unified = []
+        for block in price:
+            for p in block.get('price_list', []):
+                key = (p.get('tovar_id'), p.get('unit_id'))
+                info = mapping.get(key)
+                price_val = p.get('price') or p.get('value')
+                if info and price_val is not None:
+                    unified.append({**info, 'Цена': price_val})
 
-        df = pd.DataFrame(unified_data)
-        required_columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-        for col in required_columns:
-            if col not in df.columns:
-                df[col] = None
-        df = df[required_columns]
-
+        df = pd.DataFrame(unified)
+        cols = ['Название', 'Артикул', 'Единица измерения', 'Цена']
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+        df = df[cols]
         df['Цена'] = pd.to_numeric(df['Цена'], errors='coerce').fillna(0)
-        df = df.drop_duplicates(subset=['Артикул'], keep='last')
+        # Удаляем дубликаты по названию
+        df = df.drop_duplicates(subset=['Название'], keep='last')
         return df
 
-    def check_for_changes(self, supplier_name):
+    def _load_previous(self, supplier_name: str) -> pd.DataFrame:
         """
-        Проверяет наличие изменений между текущим и предыдущим unified файлом.
-        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
+        Загружает последний saved unified-файл из БД
         """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        
-        # Создаем текущий unified файл
-        current_df = self.create_unified_xlsx()
-        if current_df is None:
-            logger.error("Не удалось создать текущий DataFrame")
-            return False, None, None, None, None
-        
-        # Создаем папку для текущей даты
-        today_dir = os.path.join(self.supplier_path, today_str)
-        os.makedirs(today_dir, exist_ok=True)
-        
-        # Сохраняем текущий unified файл
-        current_unified_path = os.path.join(today_dir, "unified.xlsx")
-        current_df.to_excel(current_unified_path, index=False)
-        logger.info(f"Сохранен текущий unified.xlsx: {current_unified_path}")
-        
-        # Получаем предыдущий unified файл из базы данных
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT current_unified_path 
-            FROM file_records 
-            WHERE supplier_name = %s 
-            ORDER BY date DESC 
-            LIMIT 1
-        """, (supplier_name,))
-        
-        result_row = cur.fetchone()
-        previous_unified_path = result_row[0] if result_row else None
-        cur.close()
-        conn.close()
-        
-        if previous_unified_path is None or not os.path.exists(previous_unified_path):
-            logger.info("Предыдущий unified файл не найден, сравнение невозможно")
-            return False, current_unified_path, previous_unified_path, current_df, None
-        
-        try:
-            previous_df = pd.read_excel(previous_unified_path)
-            logger.info(f"Загружен предыдущий файл: {previous_unified_path}")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки предыдущего файла: {str(e)}")
-            return False, current_unified_path, previous_unified_path, current_df, None
-        
-        if current_df.equals(previous_df):
-            logger.info("Изменений нет")
-            return False, current_unified_path, previous_unified_path, current_df, previous_df
-        else:
-            logger.info("Обнаружены изменения в данных")
-            return True, current_unified_path, previous_unified_path, current_df, previous_df
-
-    def create_date_folder_with_changes(self, supplier_name):
-        """
-        Создает папку с датой и проверяет наличие изменений.
-        Возвращает (has_changes, current_unified_path, previous_unified_path, current_df, previous_df)
-        """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_dir = os.path.join(self.supplier_path, today_str)
-        
-        # Создаем папку для текущей даты
-        os.makedirs(today_dir, exist_ok=True)
-        logger.info(f"Создана папка для даты: {today_dir}")
-        
-        # Проверяем изменения
-        return self.check_for_changes(supplier_name)
-
-    def create_report_in_date_folder(self, supplier_name, has_changes, current_unified_path, 
-                                    previous_unified_path, current_df, previous_df):
-        """
-        Создает отчет в папке с датой.
-        Возвращает (report_path, unified_path)
-        """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_dir = os.path.join(self.supplier_path, today_str)
-        report_path = os.path.join(today_dir, "report.xlsx")
-        
-        if not has_changes:
-            # Создаем пустой отчет с информацией об отсутствии изменений
+        cur.execute(
+            "SELECT current_unified_path FROM file_records WHERE supplier_name=%s ORDER BY date DESC LIMIT 1",
+            (supplier_name,)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        path = row[0] if row else None
+        if path and os.path.exists(path):
             try:
-                empty_df = pd.DataFrame({
-                    'Информация': ['Изменений в данных не обнаружено'],
-                    'Дата проверки': [datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
-                    'Поставщик': [supplier_name]
-                })
-                with pd.ExcelWriter(report_path) as writer:
-                    empty_df.to_excel(writer, sheet_name='Статус', index=False)
-                logger.info(f"Создан отчет об отсутствии изменений: {report_path}")
+                return pd.read_excel(path)
             except Exception as e:
-                logger.error(f"Ошибка создания отчета: {e}")
-                return None, current_unified_path
-            
-            return report_path, current_unified_path
-        
-        # Создаем детальный отчет с изменениями
-        try:
-            merged = pd.merge(
-                previous_df,
-                current_df,
-                on='Артикул',
-                how='outer',
-                suffixes=('_prev', '_curr'),
-                indicator=True
-            )
+                logger.error(f"Ошибка чтения предыдущего файла: {e}")
+        return None
 
-            new_items = merged[merged['_merge'] == 'right_only'][
-                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-            ]
-            new_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            removed_items = merged[merged['_merge'] == 'left_only'][
-                ['Название_prev', 'Единица измерения_prev', 'Артикул', 'Цена_prev']
-            ]
-            removed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            both = merged[merged['_merge'] == 'both']
-            changed = both[
-                (both['Название_prev'] != both['Название_curr']) |
-                (both['Единица измерения_prev'] != both['Единица измерения_curr']) |
-                (both['Цена_prev'] != both['Цена_curr'])
-            ]
-            changed_items = changed[
-                ['Название_curr', 'Единица измерения_curr', 'Артикул', 'Цена_curr']
-            ]
-            changed_items.columns = ['Название', 'Единица измерения', 'Артикул', 'Цена']
-
-            # Создаем сводную информацию
-            summary_data = {
-                'Метрика': ['Всего товаров (текущих)', 'Всего товаров (предыдущих)', 
-                            'Новых товаров', 'Удаленных товаров', 'Измененных товаров'],
-                'Количество': [len(current_df), len(previous_df), 
-                              len(new_items), len(removed_items), len(changed_items)]
-            }
-            summary_df = pd.DataFrame(summary_data)
-
-            with pd.ExcelWriter(report_path) as writer:
-                summary_df.to_excel(writer, sheet_name='Сводка', index=False)
-                changed_items.to_excel(writer, sheet_name='Измененные', index=False)
-                new_items.to_excel(writer, sheet_name='Добавленные', index=False)
-                removed_items.to_excel(writer, sheet_name='Удаленные', index=False)
-            
-            logger.info(f"Создан детальный отчет: {report_path}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка создания отчета: {e}")
-            return None, current_unified_path
-
-        return report_path, current_unified_path
-
-    def make_report(self):
+    def _compare(self, prev: pd.DataFrame, curr: pd.DataFrame) -> (bool, dict):
         """
-        Основная функция для создания отчета (для обратной совместимости)
+        Сравнивает prev и curr по названию и выделяет new, removed, changed
         """
-        supplier_name = "altacera"
+        if prev is None:
+            return True, {'new': curr, 'removed': pd.DataFrame(), 'changed': pd.DataFrame()}
 
-        try:
-            # Создаем папку с датой и проверяем изменения
-            has_changes, current_unified_path, previous_unified_path, current_df, previous_df = \
-                self.create_date_folder_with_changes(supplier_name)
+        merged = prev.merge(curr, on='Название', how='outer', indicator=True,
+                             suffixes=('_prev','_curr'))
+        new = merged[merged['_merge']=='right_only'][['Название','Артикул_curr','Единица измерения_curr','Цена_curr']]
+        new.columns = ['Название','Артикул','Единица измерения','Цена']
 
-            # Если текущий датафрейм не создан — выходим, ничего не делаем
-            if current_df is None:
-                logger.error("Прерывание: не удалось получить актуальные данные, отчет не будет создан.")
-                return {
-                    "unified_path": current_unified_path,
-                    "report_path": None,
-                    "error": "Failed to create current DataFrame"
-                }
+        removed = merged[merged['_merge']=='left_only'][['Название','Артикул_prev','Единица измерения_prev','Цена_prev']]
+        removed.columns = ['Название','Артикул','Единица измерения','Цена']
 
-            # Создаем отчет
-            report_path, unified_path = self.create_report_in_date_folder(
-                supplier_name, has_changes, current_unified_path,
-                previous_unified_path, current_df, previous_df
-            )
+        both = merged[merged['_merge']=='both']
+        changed = both[(both['Артикул_prev']!=both['Артикул_curr']) |
+                       (both['Единица измерения_prev']!=both['Единица измерения_curr']) |
+                       (both['Цена_prev']!=both['Цена_curr'])][
+            ['Название','Артикул_curr','Единица измерения_curr','Цена_curr']]
+        changed.columns = ['Название','Артикул','Единица измерения','Цена']
 
-            return {"unified_path": unified_path, "report_path": report_path}
+        has = not new.empty or not removed.empty or not changed.empty
+        return has, {'new': new, 'removed': removed, 'changed': changed}
 
-        except Exception as e:
-            logger.exception(f"Необработанная ошибка в make_report: {e}")
-            return {"unified_path": None, "report_path": None, "error": str(e)}
+    def make_report(self, supplier_name: str = 'altacera') -> dict:
+        """
+        Основная точка входа: получает, сравнивает, сохраняет при изменениях
+        """
+        raw = self._fetch_raw()
+        curr_df = self._to_dataframe(raw) if raw else None
+        prev_df = self._load_previous(supplier_name)
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        dated_folder = os.path.join(self.supplier_path, date_str)
+        os.makedirs(dated_folder, exist_ok=True)
+        if curr_df is None:
+            logger.error("Не удалось получить или обработать данные")
+            return {'unified_path': None, 'report_path': None}
+
+        has_changes, parts = self._compare(prev_df, curr_df)
+        date_str = datetime.now().strftime('%Y-%m-%d')
+
+        if not has_changes:
+            logger.info("Изменений не обнаружено, файлы не создаются.")
+            return {'unified_path': None, 'report_path': None}
+
+        # Сохранение unified
+        # unified_name = f"unified_{date_str}.xlsx"
+        # unified_path = os.path.join(self.supplier_path, unified_name)
+        unified_path = os.path.join(dated_folder, 'unified.xlsx')
+
+        curr_df.to_excel(unified_path, index=False)
+        logger.info(f"Сохранен unified: {unified_path}")
+
+        # Создание отчета
+        # report_name = f"report_{date_str}.xlsx"
+        # report_path = os.path.join(self.supplier_path, report_name)
+        report_path = os.path.join(dated_folder, 'report.xlsx')
+
+        summary = pd.DataFrame({
+            'Метрика': ['Всего (текущих)', 'Всего (предыдущих)', 'Добавленные', 'Удаленные', 'Измененные'],
+            'Количество': [len(curr_df), len(prev_df) if prev_df is not None else 0,
+                           len(parts['new']), len(parts['removed']), len(parts['changed'])]
+        })
+        with pd.ExcelWriter(report_path) as writer:
+            summary.to_excel(writer, sheet_name='Сводка', index=False)
+            parts['new'].to_excel(writer, sheet_name='Добавленные', index=False)
+            parts['removed'].to_excel(writer, sheet_name='Удаленные', index=False)
+            parts['changed'].to_excel(writer, sheet_name='Измененные', index=False)
+        logger.info(f"Сохранен отчет: {report_path}")
+
+        # Запись в базу
+        conn = get_db_connection()
+        cur = conn.cursor()
+        prev_path = self._load_previous_path(supplier_name)
+        cur.execute(
+            "INSERT INTO file_records(date,current_unified_path,previous_unified_path,report_path,supplier_name)"
+            " VALUES(%s,%s,%s,%s,%s)"
+            " ON CONFLICT(date,supplier_name) DO UPDATE SET"
+            " current_unified_path=EXCLUDED.current_unified_path, report_path=EXCLUDED.report_path",
+            (date_str, unified_path, prev_path, report_path, supplier_name)
+        )
+        conn.commit(); cur.close(); conn.close()
+
+        return {'unified_path': unified_path, 'report_path': report_path}
+
+    def _load_previous_path(self, supplier_name: str) -> str:
+        """
+        Возвращает путь к предыдущему unified из БД
+        """
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT current_unified_path FROM file_records WHERE supplier_name=%s ORDER BY date DESC LIMIT 1",
+            (supplier_name,)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        return row[0] if row else None
