@@ -5,7 +5,6 @@ database/init.sql
 __pycache__/
 **/__pycache__/
 
-# Дополнительно: игнорировать скомпилированные Python-файлы
 *.pyc
 *.pyo
 *.pyd
